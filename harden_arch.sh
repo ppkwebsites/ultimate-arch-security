@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 # Global arrays to track status
 DECLARED_FEATURES=()
-INSTALLED_FEATURES=()
+INSTALLED_FEATURES=() # Removed the trailing backslash here
 SKIPPED_FEATURES=()
 FAILED_FEATURES=()
 UNIMPLEMENTED_FEATURES=() # For features that cannot be fully automated or require manual firmware interaction
@@ -44,11 +44,11 @@ handle_error() {
     local error_message="$2"
     echo -e "${RED}Error for ${feature_name}: ${error_message}${NC}"
     FAILED_FEATURES+=("$feature_name (Error: $error_message)")
+    # Removed 'exit 1' here. Script will now continue even if user chooses not to proceed after an error.
     if confirm_action "Do you want to continue despite this error for ${feature_name}?"; then
         echo -e "${YELLOW}Continuing as requested.${NC}"
     else
-        echo -e "${RED}Exiting script. Please address the error and try again.${NC}"
-        exit 1
+        echo -e "${YELLOW}Skipping further actions for ${feature_name} as requested, but continuing script execution.${NC}"
     fi
 }
 
@@ -214,7 +214,7 @@ else
 fi
 
 # Sysctl Hardening check
-if [ -f "/etc/sysctl.d/99-security-hardening.conf" ] && grep -q "kernel.kptr_restrict = 1" /etc/sysctl.d/99-security-hardening.conf; then
+if [ -f "/etc/sysctl.d/99-security-hardening.conf" ] && is_sysctl_set "kernel.kptr_restrict" "2" && is_sysctl_set "kernel.yama.ptrace_scope" "2" && is_sysctl_set "kernel.randomize_kstack_offset" "1"; then
     INSTALLED_FEATURES+=("Sysctl Hardening")
 else
     DECLARED_FEATURES+=("Sysctl Hardening")
@@ -635,7 +635,7 @@ else
 
         cat << EOF > "$SYSCTL_CONF"
 # Kernel Self Protection / Exploit Mitigation
-kernel.kptr_restrict = 1
+kernel.kptr_restrict = 2 # Restrict access to kernel pointers (more restrictive)
 kernel.dmesg_restrict = 1
 kernel.unprivileged_bpf_disabled = 1
 kernel.unprivileged_userns_clone = 0 # May break Flatpak/Docker without further config
@@ -645,6 +645,7 @@ vm.mmap_rnd_compat_bits = 16
 vm.stack_shuffle = 1
 fs.protected_fifos = 2
 fs.protected_hardlinks = 1
+kernel.randomize_kstack_offset = 1 # Randomize kernel stack offset on syscall entries
 
 # Network Hardening
 net.ipv4.conf.all.rp_filter = 1
@@ -664,7 +665,7 @@ net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 
 # Restrict ptrace
-kernel.yama.ptrace_scope = 1
+kernel.yama.ptrace_scope = 2 # Harden against ptrace attacks (more restrictive)
 EOF
 
         sysctl --system
@@ -915,7 +916,7 @@ else
 
                 echo -e "${GREEN}Installing lkrg-dkms from AUR...${NC}"
                 # Run yay as the current user for security, it will prompt for sudo password internally
-                if ! sudo -u "$CURRENT_USER" yay -S --noconfirm lkrg-dkms; then # No --needed for yay as it handles this
+                if ! sudo -u "$CURRENT_USER" yay -S --noconfirm lkrg-dkms; then
                     handle_error "Linux Kernel Runtime Guard (LKRG)" "Failed to install lkrg-dkms from AUR. Please check AUR helper output and error messages (e.g., 'makepkg as root' errors indicate yay was run with sudo incorrectly, or missing build dependencies)."
                     SKIPPED_FEATURES+=("Linux Kernel Runtime Guard (LKRG) (installation failed)")
                 else
@@ -964,6 +965,8 @@ else
             if [ "$BOOTLOADER" == "grub" ]; then
                 GRUB_CFG="/etc/default/grub"
                 if [ -f "$GRUB_CFG" ]; then
+                    cp "$GRUB_CFG" "$GRUB_CFG.bak_hardening" # Backup
+
                     CURRENT_GRUB_CMDLINE=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_CFG" | sed -E 's/GRUB_CMDLINE_LINUX_DEFAULT="(.*)"/\1/')
                     UPDATED_GRUB_CMDLINE="$CURRENT_GRUB_CMDLINE"
 
@@ -1043,7 +1046,7 @@ else
                                 else
                                     handle_error "AppArmor Profiles" "Failed to modify $TARGET_BOOT_ENTRY_FILE for AppArmor. Manual edit required."
                                     UNIMPLEMENTED_FEATURES+=("AppArmor Profiles (systemd-boot modification failed)")
-                                fi # FIXED: Changed 'fn' to 'fi' here
+                                fi
                             else
                                 handle_error "AppArmor Profiles" "systemd-boot entry file $TARGET_BOOT_ENTRY_FILE not found for AppArmor configuration. Manual edit required."
                                 UNIMPLEMENTED_FEATURES+=("AppArmor Profiles (systemd-boot entry file not found)")
@@ -1121,7 +1124,7 @@ EOF
                 echo -e "${YELLOW}Verify with 'chronyc sources -v' or 'chronyc ntsdata'.${NC}"
                 INSTALLED_FEATURES+=("Secure Time Synchronization (chrony with NTS)")
             else
-                handle_error "Secure Time Synchronization (chrony with NTS)" "Failed to enable/start chronyd service. Check 'journalctl -xe' for errors."
+                handle_error "Secure Time Synchronization (chrony with NTS)" "Failed to enable/start chronyd service."
             fi
         fi
     else
@@ -1381,10 +1384,10 @@ echo -e "${BLUE}Here's a summary of the security features addressed by this scri
 
 echo -e "${BLUE}--- Features Successfully Applied ---${NC}"
 if [ ${#INSTALLED_FEATURES[@]} -eq 0 ]; then
-    echo -e "${YELLOW}  No features were successfully applied by this script.${NC}"
+    echo -e "${YELLOW}  No features were successfully applied by this script.${NC}\n"
 else
     for feature in "${INSTALLED_FEATURES[@]}"; do
-        echo -e "${GREEN}  ✔ $feature${NC}"
+        echo -e "${GREEN}  ✔ $feature${NC}\n" # Added extra newline for readability
     done
 fi
 echo -e "\n--------------------------------------------------------------------------\n" # Separator for readability
@@ -1403,11 +1406,11 @@ for feature in "${UNIMPLEMENTED_FEATURES[@]}"; do
 done
 
 if [ ${#ALL_NON_INSTALLED_FEATURES[@]} -eq 0 ]; then
-    echo -e "${GREEN}  All targeted features were successfully applied or already configured.${NC}"
+    echo -e "${GREEN}  All targeted features were successfully applied or already configured.${NC}\n"
 else
     for feature in "${ALL_NON_INSTALLED_FEATURES[@]}"; do
         # Non-success features already have color codes and symbols
-        echo -e "${YELLOW}  $feature${NC}" # Using YELLOW for all non-success for consistency, symbols provide distinction
+        echo -e "${YELLOW}  $feature${NC}\n" # Added extra newline for readability
     done
 fi
 echo -e "\n${BLUE}--------------------------------------------------------------------------${NC}\n"
